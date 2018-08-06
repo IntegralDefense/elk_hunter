@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+cd /opt/elk_hunter || { echo "cannot cd to /opt/elk_hunter"; exit 1; }
+python3 bin/elk_hunter.py -k || exit 1
