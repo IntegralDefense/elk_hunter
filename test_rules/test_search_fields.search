@@ -1,0 +1,8 @@
+--index:*:commandline_log_source_index
+--search:
+# <-- this is a comment
+   command_line:*Start\-Process* AND 
+   command_line:*\:\/\/* AND 
+
+# filter out results (lucene uses the - sign for NOT - you can also use NOT - syntax supports all lucene supported searches for elasticsearch
+   -command_line:*\\stupid_internal_app.ps1*
