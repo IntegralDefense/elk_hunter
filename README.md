@@ -69,7 +69,7 @@ Additionally, we have added some custom capability to extend the lucene search s
 - **--field-rename:**
   - optional field
   - **parameters**
-  1. string with two field names separated by comma. the first item is the current field name, the second item is the name to change it to
+    1. string with two field names separated by comma. the first item is the current field name, the second item is the name to change it to
   - **example**
 
         --field-rename:hostname,computer_name
@@ -78,11 +78,13 @@ Additionally, we have added some custom capability to extend the lucene search s
   - optional field
   - sometimes you want to create a new field from an existing field within a structure field, maybe for pulling out specific observables to pass to ACE
   - **parameters**
+  
     1. new field name (the key within the resulting json document to create)
     2. field to run the split on
     3. the array item (base 0) of the split action for the given delimiter on the second parameter (field to run the split on)
     4. the delimiter specified with the \_\_delim: tag (think of this as being the param to a typical string.split() that yeilds an array, thus specify which array item you want to use to create the new field
   - **example** - if username='CORPDOMAIN\USERID', the following will create a field named 'userid' = 'USERID'
+  
         --field-split:userid,username,1,__delim:'\'
 
 - **--add-field:**
