@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+ls -d /opt/elk_hunter/rules* | while read dir
+do
+    cd "$dir" || { echo "failed to cd into $dir"; exit 1; }
+    echo -n "updating $dir @ "
+    date
+    git pull
+done

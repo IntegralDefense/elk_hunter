@@ -17,6 +17,7 @@ import time
 import traceback
 import requests
 import json
+requests.packages.urllib3.disable_warnings()
 
 
 # custom ConfigParser to keep case sensitivity
@@ -280,6 +281,209 @@ class ELKSearch(object):
             with open(os.path.join(BASE_DIR, 'logs', '{0}.stats'.format(self.search_name)), 'a') as fp:
                 fp.write('{0}\t{1}\r\n'.format(start_time, end_time - start_time))
 
+
+    #note that elasticsearch stores timestamp in utc, need to make sure the earliest & latest are in utc
+    def get_time_spec_json(self,earliest,latest,use_index_time):
+        # get upper limit of time range filter for query
+        now = time.mktime(time.localtime())
+        if latest is None:
+            latest = self.config['rule']['latest']
+            if DAEMON_MODE and self.config['rule'].getboolean('full_coverage') and self.last_executed_time:
+                latest = datetime.utcfromtimestamp(now)
+                # are we adjusting all the times backwards?
+                if GLOBAL_TIME_OFFSET is not None:
+                    logging.debug("adjusting timespec by {0}".format(GLOBAL_TIME_OFFSET))
+                    latest = latest - GLOBAL_TIME_OFFSET
+                latest = latest.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3]
+
+        # get lower limit of time range filter for query
+        if earliest is None:
+            earliest = "{}{}".format(latest, self.config['rule']['earliest'])
+            if DAEMON_MODE and self.config['rule'].getboolean('full_coverage') and self.last_executed_time:
+                earliest = datetime.utcfromtimestamp(self.last_executed_time)
+                # are we adjusting all the times backwards?
+                if GLOBAL_TIME_OFFSET is not None:
+                    logging.debug("adjusting timespec by {0}".format(GLOBAL_TIME_OFFSET))
+                    earliest = earliest - GLOBAL_TIME_OFFSET
+                earliest = earliest.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3]
+
+        # lookup if we are supposed to use the index time or event timestamp
+        if use_index_time is None:
+            use_index_time = self.config['rule'].getboolean('use_index_time')
+
+        # create time range filter for query
+        if use_index_time:
+            time_spec = { "range": { "@timestamp": { "gt": earliest, "lte": latest } } }
+        else:
+            time_spec = { "range": { "event_timestamp": { "gt": earliest, "lte": latest } } }
+
+        return time_spec
+
+   
+    def search_to_json(self,search,index,filter_script,fields,earliest,latest,use_index_time,max_result_count):
+        search_json = {
+            'query': {
+                'bool': {
+                    'filter': [
+                    {
+                        'query_string': {
+                            'query': search
+                        }
+                    },
+                    self.get_time_spec_json(earliest,latest,use_index_time)
+                    ]
+                }
+            }
+        }
+        if fields:
+            search_json['_source'] = fields.split(',')
+        search_uri = "{}{}/_search".format(CONFIG['elk']['uri'],index)
+        if filter_script:
+            script = { 
+                'script': {
+                    'script' : filter_script
+                }
+            }
+            search_json['query']['bool']['filter'].append(script)
+
+        # set max result count
+        if max_result_count is None:
+            max_result_count = self.config['rule'].getint('max_result_count')
+        search_json['size'] = max_result_count
+
+        return search_json,search_uri
+
+    def perform_query(self,search_json,search_uri):
+        # perform query
+        logging.debug("executing search {} of {}".format(self.search_name, search_uri))
+        logging.debug("{}".format(json.dumps(search_json)))
+        headers = {'Content-type':'application/json'}
+        search_result = requests.get(search_uri,data=json.dumps(search_json),headers=headers,verify=False)
+        if search_result.status_code != 200:
+            logging.error("search failed for {0}".format(self.search_name))
+            logging.error(search_result.text)
+            return False
+        logging.debug("result messages: timed_out:{} - took:{} - _shards:{} - _clusters:{}".format(search_result.json()['timed_out'],search_result.json()['took'],search_result.json()['_shards'],search_result.json()['_clusters']))
+        return search_result
+
+    #I have not found a way to do this from an elastic search language perspective
+    #this function is used to pull configs from the search file into a dictionary for post processing of results
+    def getSearchAddedFields(self,search):
+        #--add-field:bat_path,command_line,\"[^\"]+\.bat\"
+        #--add-field:exe_path,command_line,\"[^\"]+\.exe\"
+        item = '--add-field:'
+        new_fields = []
+        new_field = {}
+        for x in re.split('^| --',search):
+            x = x.strip()
+            new_field = {}
+            if x.startswith(item) or x.startswith('--'+item) or x.startswith(item[2:]):
+               params = x.split(":",1)[1].strip()
+               new_field['new_field_name'],new_field['from_field_name'],new_field['regex'] = params.split(',',2)
+               new_fields.append(new_field)
+        if new_fields:
+            return new_fields
+        else:
+            return None
+
+    #there are times we like to add fields together to create a new field, I can't figure out how to do this in elasticsearch and still get the entire document in the output results, so doing it on the client side
+    def getSearchJoinedFields(self,search):
+        #--join-fields:exe_location,hostname,exe_path,@
+        #--join-fields:user_account,hostname,username,--delim:,
+        item = 'join-fields:'
+        delimiter = ',__delim:'
+        new_fields = []
+        new_field = {}
+        for x in re.split('^| --',search):
+            x = x.strip()
+            new_field = {}
+            if x.startswith(item) or x.startswith('--'+item) or x.startswith(item[2:]):
+               #get delimiter to join string with
+               jfields,new_field['delim'] = x.split(delimiter)
+               new_field['delim'] = new_field['delim'].strip().strip('\'')
+               jfields = jfields.split(item)[1]
+               new_field['new_field_name'],new_field['fields'] = jfields.split(",",1)
+               new_fields.append(new_field)
+        if new_fields:
+            return new_fields
+        else:
+            return None
+
+    def getSearchSplitField(self,search):        
+        #--field-split:user,username,1,__delim:'\'
+        item = 'field-split:'
+        delimiter = ',__delim:'
+        new_fields = []
+        new_field = {}
+        for x in re.split('^| --',search):
+            x = x.strip()
+            new_field = {}
+            if x.startswith(item) or x.startswith('--'+item) or x.startswith(item[2:]):
+               sfields,new_field['delim'] = x.split(delimiter)
+               new_field['delim'] = new_field['delim'].strip().strip('\'')
+               sfields = sfields.split(item)[1]
+               new_field['new_field_name'],new_field['from_field_name'],new_field['array_item'] = sfields.split(',',2)
+               new_fields.append(new_field)
+               #logging.debug("adding field based on split: {} {} {} {}".format(new_field['new_field_name'],new_field['from_field_name'],new_field['delim'],new_field['array_item']))
+        if new_fields:
+            return new_fields
+        else:
+            return None
+        
+    
+    def getSearchFileItem(self,search,item):
+        for x in re.split('^| --',search):
+            x = x.strip() 
+            if x.startswith(item) or x.startswith('--'+item) or x.startswith(item[2:]):
+                return x.split(":",1)[1].strip() 
+
+        return None
+
+    def addNewFieldsToResult(self,alert_result,added_fields):
+        #print("{} {}".format(json.dumps(alert_result),json.dumps(added_fields)))
+        #for any new fields defined from existing fields for output
+        if added_fields:
+            for field in added_fields:
+                if field['from_field_name'] in alert_result['_source']:
+                    regex = re.compile(field['regex'])
+                    m = regex.search(alert_result['_source'][field['from_field_name']])
+                    if m:
+                        alert_result['_source'][field['new_field_name']] = m.group(0).strip("\"").strip()
+                    else:
+                        logging.debug('no match to create new field {}, with regex {}, for content {}'.format(field['new_field_name'],field['regex'],alert_result['_source'][field['from_field_name']]))
+                else:
+                    logging.debug('not able to add new field {}, {} does not exist'.format(field['new_field_name'],field['from_field_name']))
+        return alert_result
+
+    def addSplitFieldToResult(self,alert_result,split_fields):
+        if split_fields:
+            for field in split_fields:
+                if field['from_field_name'] in alert_result['_source']:
+                    #new field = <existing field>.split(delim)[array_item]
+                    if field['delim'] in alert_result['_source'][field['from_field_name']]:
+                        alert_result['_source'][field['new_field_name']] = alert_result['_source'][field['from_field_name']].split(field['delim'])[int(field['array_item'])]
+                        logging.debug('created new field {}:{}'.format(field['new_field_name'],alert_result['_source'][field['new_field_name']]))
+                    else:
+                        logging.debug('split did not match, just copying field contents as default behavior {} {} {} {}'.format(field['from_field_name'],field['delim'],field['array_item'],alert_result['_source'][field['from_field_name']]))
+                        alert_result['_source'][field['new_field_name']] = alert_result['_source'][field['from_field_name']]
+        return alert_result
+
+    def addJoinedFieldToResult(self,alert_result,joined_fields):
+        if joined_fields:
+            for fields in joined_fields:
+                fields_exist = True
+                for field in fields['fields'].split(','): #comma separated list of fields to concatentate
+                    if not field in alert_result['_source']:
+                        logging.warning("Join Field Error - Missing Field - {} - Not joining fields for this alert in {}".format(field,alert_result['_source'].keys()))
+                        fields_exist = False
+                if fields_exist:
+                    build_field = ""
+                    for field in fields['fields'].split(','):
+                        build_field = build_field + alert_result['_source'][field] + fields['delim']
+                    build_field = build_field[:len(build_field)-len(fields['delim'])] #take off the last delim from the loop
+                    alert_result['_source'][fields['new_field_name']] = build_field
+        return alert_result
+        
     def _execute(self, earliest=None, latest=None, use_index_time=None, max_result_count=None):
         # read in search text
         with open(self.config['rule']['search'], 'r') as fp:
@@ -302,108 +506,107 @@ class ELKSearch(object):
             with open(include_path, 'r') as fp:
                 search_text = search_text.replace(m.group(0), fp.read().strip())
 
-        # parse search text json into object
-        search_json = json.loads(search_text)
+        search_text = search_text.replace("\n"," ")
 
-        # parse csv input
-        if 'query' in search_json:
-            if 'bool' in search_json['query']:
-                search_keys = [ "filter", "must", "must_not", "should" ]
-                new_search_json = {}
-                for search_key in search_keys:
-                    if search_key not in search_json['query']['bool']:
-                        continue
+        searches = search_text.split(" |pipe-field-output ")
 
-                    if type(search_json['query']['bool'][search_key]) is not list:
-                        continue
-
-                    new_search_json[search_key] = []
-
-                    for item in search_json['query']['bool'][search_key]:
-                        if 'csv' not in item:
-                            new_search_json[search_key].append(item)
-                            continue
-
-                        csv_path = os.path.join(BASE_DIR, item['csv']['input'])
-                        if not os.path.exists(csv_path):
-                            logging.fatal("rule {0} csv file {1} does not exist".format(self.search_name, csv_path))
-                            sys.exit(1)
-
-                        with open(csv_path, 'r') as fp:
-                            for line in fp:
-                                line = line.strip()
-
-                                # ignore empty lines
-                                if line == "":
-                                    continue
-
-                                # split line on comma
-                                row_tmp = line.split(',')
-
-                                # strip columns of whitespace and quotes
-                                row = []
-                                for column in row_tmp:
-                                    column = column.strip()
-                                    column = column.strip('"\'')
-                                    row.append(column)
-
-                                # replace csv output markers with csv data
-                                csv_output = item['csv']['output'].format(*row)
-                                csv_json = json.loads(csv_output)
-
-                                # add csv output to new search json
-                                new_search_json[search_key].append(csv_json)
-
-                # replace search json with new search json
-                for key in new_search_json:
-                    search_json['query']['bool'][key] = new_search_json[key]
-
-        # get upper limit of time range filter for query
-        now = time.mktime(time.localtime())
-        if latest is None:
-            latest = self.config['rule']['latest']
-            if DAEMON_MODE and self.config['rule'].getboolean('full_coverage') and self.last_executed_time:
-                latest = datetime.fromtimestamp(now)
-                # are we adjusting all the times backwards?
-                if GLOBAL_TIME_OFFSET is not None:
-                    logging.debug("adjusting timespec by {0}".format(GLOBAL_TIME_OFFSET))
-                    latest = latest - GLOBAL_TIME_OFFSET
-                latest = latest.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3]
-
-        # get lower limit of time range filter for query
-        if earliest is None:
-            earliest = "{}{}".format(latest, self.config['rule']['earliest'])
-            if DAEMON_MODE and self.config['rule'].getboolean('full_coverage') and self.last_executed_time:
-                earliest = datetime.fromtimestamp(self.last_executed_time)
-                # are we adjusting all the times backwards?
-                if GLOBAL_TIME_OFFSET is not None:
-                    logging.debug("adjusting timespec by {0}".format(GLOBAL_TIME_OFFSET))
-                    earliest = earliest - GLOBAL_TIME_OFFSET
-                earliest = earliest.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3]
-
-        # lookup if we are supposed to use the index time or event timestamp
-        if use_index_time is None:
-            use_index_time = self.config['rule'].getboolean('use_index_time')
-
-        # create time range filter for query
-        if use_index_time:
-            time_spec = { "range": { "index_time": { "gt": earliest, "lte": latest } } }
-        else:
-            time_spec = { "range": { "@timestamp": { "gt": earliest, "lte": latest } } }
-
-        # add time range filter to query
-        if 'query' not in search_json:
-            search_json['query'] = {}
-        if 'bool' not in search_json['query']:
-            search_json['query']['bool'] = {}
-        if 'filter' not in search_json['query']['bool']:
-            search_json['query']['bool']['filter'] = []
-        search_json['query']['bool']['filter'].append(time_spec)
+        #print(searches)
+        added_fields = None
+        joined_fields = None
+        search_index = None
+        output_fields = None
+        output_field_rename = None
         
-        # set max result count
-        if max_result_count is None:
-            max_result_count = self.config['rule'].getint('max_result_count')
-        search_json['size'] = max_result_count
+        search_json = None
+        now = time.mktime(time.localtime())
+        #if there is only one search defined (no subsearch, no |pipe_field-output), things are easier
+        #get all the supported parameters from the file and create the json needed for the search
+        if len(searches) == 1:
+            search_index = self.getSearchFileItem(searches[0],'--index:')
+            search_query = self.getSearchFileItem(searches[0],'--search:') 
+            output_fields = self.getSearchFileItem(searches[0],'--fields:')
+            filter_script = self.getSearchFileItem(searches[0],'--filter-script:')
+            added_fields = self.getSearchAddedFields(searches[0])
+            joined_fields = self.getSearchJoinedFields(searches[0])
+            split_fields = self.getSearchSplitField(searches[0])
+            search_json,search_uri = self.search_to_json(search_query,search_index,filter_script,output_fields,earliest,latest,use_index_time,max_result_count)
+ 
+        else:
+            i = 0
+            piped_search_output = []
+            for search in searches:
+                search = search.strip()
+                i = i + 1
+                search_index = self.getSearchFileItem(search,'--index:')
+                search_query = self.getSearchFileItem(search,'--search:')
+                output_fields = self.getSearchFileItem(search,'--fields:')
+                filter_script = self.getSearchFileItem(search,'--filter-script:')
+
+                added_fields = self.getSearchAddedFields(search)
+                joined_fields = self.getSearchJoinedFields(search)
+                split_fields = self.getSearchSplitField(search)
+
+                output_field_rename = self.getSearchFileItem(search,'--field-rename:')
+                #append previous command output to this search if not the first search
+                if i > 1 and len(piped_search_output) > 0:
+                    x = 0
+                    for item in piped_search_output:
+                        for key,value in item.items():
+                            if x == 0: 
+                                if search_query.strip() != "":
+                                    search_query = '{} AND ({}:"{}"'.format(search_query,key,value)
+                                else: #if no additional search text
+                                    search_query = '({}:"{}"'.format(key,value)
+                                x = x + 1
+                            else:
+                                search_query = '{} OR {}:"{}"'.format(search_query,key,value)
+                    search_query = '{})'.format(search_query)
+                    #reinitialize so output isn't used again accidentally
+                    piped_search_output = []
+
+                search_json,search_uri = self.search_to_json(search_query,search_index,filter_script,output_fields,earliest,latest,use_index_time,max_result_count)
+
+                #if not the last search, perform the query, rename fields if needed
+                if i != len(searches):
+                    search_json['size'] = 10000
+                    logging.debug("lucene search: {}".format(search_query))
+                    search_result = self.perform_query(search_json,search_uri)
+                    if not search_result:
+                        if DAEMON_MODE:
+                            self.last_executed_time = now
+                        return False
+                    results = search_result.json()["hits"]["hits"]
+                    # if no results, then don't search again, just quit, but make sure we log that we ran it
+                    if not results:
+                        if DAEMON_MODE:
+                            self.last_executed_time = now
+                        return False
+                    deduped_output = set()
+                    if len(search_result.json()["hits"]["hits"]) > 9999:
+                        logging.error("piped search results too big. >= 10000 results (elasticsearch limit). Exiting.")
+                        if DAEMON_MODE:
+                            self.last_executed_time = now
+                        return False
+                    for hit in results:
+                        #if we are changing the field name, change it in the results
+                        if output_field_rename:
+                            current_field,new_field = output_field_rename.split(',')
+                            current_hit = hit['_source'][current_field]
+                            hit['_source'][new_field] = current_hit
+                            del hit['_source'][current_field] 
+                        #only add items that do not exist (dedup/unique)
+                        deduped_output.add(json.dumps(hit['_source']))
+                    for n in deduped_output:
+                        piped_search_output.append(json.loads(n))
+
+        logging.debug("lucene search: {}".format(search_query))
+        search_result =  self.perform_query(search_json,search_uri)
+        if not search_result:
+            return False
+
+        # record the fact that we ran it
+        if DAEMON_MODE:
+            self.last_executed_time = now
 
         # get group by value
         if 'group_by' in self.config['rule']:
@@ -411,29 +614,21 @@ class ELKSearch(object):
         else:
             group_by_value = None
 
-        # create search uri
-        search_uri = "{}_search".format(CONFIG['elk']['uri'])
-        if 'index' in self.config['rule']:
-            search_uri = "{}{}/_search".format(CONFIG['elk']['uri'], self.config['rule']['index'])
-
-        # perform query
-        logging.info("executing search {} of {}".format(self.search_name, search_uri))
-        search_result = requests.post(search_uri, json=search_json)
-        if search_result.status_code != 200:
-            logging.error("search failed for {0}".format(self.search_name))
-            logging.error(search_result.text)
-            return False
-
-        # record the fact that we ran it
-        if DAEMON_MODE:
-            self.last_executed_time = now
-
         # group results
         alerts = {}
         tmp_key = 0
         results = search_result.json()["hits"]["hits"]
         for alert_result in results:
             combined_results = {}
+            #####for any new fields defined from existing fields for output
+            if added_fields:
+                alert_result = self.addNewFieldsToResult(alert_result,added_fields) 
+            if split_fields:
+                alert_result = self.addSplitFieldToResult(alert_result,split_fields)
+            if joined_fields:
+                alert_result = self.addJoinedFieldToResult(alert_result,joined_fields)
+            ####
+            
             if "_source" in alert_result:
                 combined_results.update(alert_result["_source"])
             if "fields" in alert_result:
@@ -450,7 +645,11 @@ class ELKSearch(object):
                     alerts[tmp_key] = []
                 alerts[tmp_key].append(combined_results)
             else:
-                alerts["null"].append(combined_results)
+                alerts["null"] = combined_results
+        if alerts:
+            logging.debug("{}".format(json.dumps(alerts)))
+        else:
+            logging.debug("no results")
 
         for alert_key in alerts.keys():
             alert_title = '{} - {}'.format(self.config['rule']['name'], alert_key)
@@ -466,7 +665,8 @@ class ELKSearch(object):
                 alert_type=alert_type,
                 desc=alert_title,
                 event_time=time.strftime("%Y-%m-%d %H:%M:%S"),
-                details=alert_key,
+                #details=alert_key,
+                details=alerts[alert_key],
                 name=self.config['rule']['name'],
                 company_name=CONFIG['ace']['company_name'],
                 company_id=CONFIG['ace'].getint('company_id'))
@@ -496,7 +696,7 @@ class ELKSearch(object):
 
                 for o_field in self.config['observable_mapping'].keys():
                     if o_field not in observables:
-                        logging.debug("field {0} does not exist in event".format(o_field))
+                        logging.debug("field {} does not exist in event with observables {}".format(o_field,observables))
                         continue
 
                     o_type = self.config['observable_mapping'][o_field]
@@ -528,7 +728,6 @@ class ELKSearch(object):
                     alert.submit(CONFIG['ace']['uri'], CONFIG['ace']['key'])
                 except Exception as e:
                     logging.error("unable to submit alert {}: {}".format(alert, str(e)))
-                    #report_error("unable to submit alert {}: {}".format(alert, e))
 
             logging.debug(str(alert))
 
@@ -563,6 +762,15 @@ if __name__ == '__main__':
         help="Use __index time specs instead.")
 
     parser.add_argument("searches", nargs=argparse.REMAINDER, help="One or more searches to execute.")
+
+    #subparsers = parser.add_subparsers(dest='command') #title='subcommands', help='additional help')
+    #manual_search_commands = [ 'cli_search']
+    #manual_search_parser = subparsers.add_parser('cli_search',help='search with command line')
+    #manual_search_parser.add_argument('--search',action='store',required=True,help='the lucene search')
+    #manual_search_parser.add_argument('--index',action='store',required=True,help='the elasticsearch index to search')
+    #manual_search_parser.add_argument('--fields',action='store',help='print the following fields instead of the entire output <comma delimited list of fieldsi>')
+    #manual_search_parser.add_argument('--add-field',action='store',help='3 arguments comma separated. <new_field_name>,<field_name_to_match>,<regex to match>')
+    #manual_search_parser.add_argument('--join-fields-with',action='store',help='comma separated list of fields to join with the last item in the list being a character or string to join fields with <jar_location,hostname,jar_file,@')
 
     args = parser.parse_args()
 
