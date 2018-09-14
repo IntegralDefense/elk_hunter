@@ -61,7 +61,7 @@ Additionally, we have added some custom capability to extend the lucene search s
 - **--fields:**
   - optional field
   - **parameters**
-    - comma separated list of field names to output (this basically just adds the "\_sources" json to the search)
+    1. comma separated list of field names to output (this basically just adds the "\_sources" json to the search)
   - **example**
 
         --fields:command_line,username,hostname
@@ -69,7 +69,7 @@ Additionally, we have added some custom capability to extend the lucene search s
 - **--field-rename:**
   - optional field
   - **parameters**
-    - string with two field names separated by comma. the first item is the current field name, the second item is the name to change it to
+    1. string with two field names separated by comma. the first item is the current field name, the second item is the name to change it to
   - **example**
 
         --field-rename:hostname,computer_name
@@ -79,10 +79,10 @@ Additionally, we have added some custom capability to extend the lucene search s
   - sometimes you want to create a new field from an existing field within a structure field, maybe for pulling out specific observables to pass to ACE
   - **parameters**
   
-    - new field name (the key within the resulting json document to create)
-    - field to run the split on
-    - the array item (base 0) of the split action for the given delimiter on the second parameter (field to run the split on)
-    - the delimiter specified with the \_\_delim: tag (think of this as being the param to a typical string.split() that yeilds an array, thus specify which array item you want to use to create the new field
+    1. new field name (the key within the resulting json document to create)
+    2. field to run the split on
+    3. the array item (base 0) of the split action for the given delimiter on the second parameter (field to run the split on)
+    4. the delimiter specified with the \_\_delim: tag (think of this as being the param to a typical string.split() that yeilds an array, thus specify which array item you want to use to create the new field
   - **example** - if username='CORPDOMAIN\USERID', the following will create a field named 'userid' = 'USERID'
   
         --field-split:userid,username,1,__delim:'\'
@@ -91,9 +91,9 @@ Additionally, we have added some custom capability to extend the lucene search s
   - optional field
   - There are instances where you would like to add data elements based on existing fields to the output of the elasticsearch json results, but as far as I can tell that isn't possible with lucene, so we've added a --add-field parameter allowed in the search file.
   - **parameters**
-    - new field name (the key within the resulting json document to create)
-    - from field name (the field name that you want to extract data from to create the new field content)
-    - regex (regex for matching the content that should be put into the new field name contents)
+    1. new field name (the key within the resulting json document to create)
+    2. from field name (the field name that you want to extract data from to create the new field content)
+    3. regex (regex for matching the content that should be put into the new field name contents)
   - **example** - this will add "bat_file" and "exe_file" field output to each result
 
         --index:your_index_name_for_your_data_in_elasticsearch
@@ -105,9 +105,9 @@ Additionally, we have added some custom capability to extend the lucene search s
   - optional field
   - concatenate two fields into a new field
   - **parameters**
-    - new field name to create
-    - field names to join/concat separated by ","
-    - \_\_delim: character or string delimiter
+    1. new field name to create
+    2. field names to join/concat separated by ","
+    3. \_\_delim: character or string delimiter
   - **example** - this will create a new field named domain  = hostname\username
 
         --join-fields:domain,hostname,username,__delim:'\'
@@ -116,7 +116,7 @@ Additionally, we have added some custom capability to extend the lucene search s
   - optional field
   - sometimes you just need to regex to find certain things within your data or write a small script. this custom parameter allows you to add a script to your query filter
   - **parameters**
-    - your script -> same as the value of the script  tag within a filter for dsl
+    1. your script -> same as the value of the script  tag within a filter for dsl
   - **example** - maybe you want to find command line values that have more than 100 of the following characters in a row added to your lucene search:
 
         --filter-script:/[0-9a-zA-Z+\/=]{100,}/.matcher(doc['command_line'].value).find()
