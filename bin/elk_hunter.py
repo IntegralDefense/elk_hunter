@@ -313,9 +313,11 @@ class ELKSearch(object):
 
         # create time range filter for query
         if use_index_time:
-            time_spec = { "range": { "@timestamp": { "gt": earliest, "lte": latest } } }
+            #index_time is the field we use in elasticsearch for when the data was indexed
+            time_spec = { "range": { "index_time": { "gt": earliest, "lte": latest } } }
         else:
-            time_spec = { "range": { "event_timestamp": { "gt": earliest, "lte": latest } } }
+            #@timestamp is the time of the event in the log that is being indexed
+            time_spec = { "range": { "@timestamp": { "gt": earliest, "lte": latest } } }
 
         return time_spec
 
