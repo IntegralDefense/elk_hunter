@@ -339,7 +339,11 @@ class ELKSearch(object):
         }
         if fields:
             search_json['_source'] = fields.split(',')
-        search_uri = "{}{}/_search".format(CONFIG['elk']['uri'],index)
+        #allow for index to not be set, many companies will create a field for the index alias instead of using elasticsearch's index pattern and just alias *
+        if index:
+            search_uri = "{}{}/_search".format(CONFIG['elk']['uri'],index)
+        else:
+            search_uri = "{}{}/_search".format(CONFIG['elk']['uri'],"*:*")
         if filter_script:
             script = { 
                 'script': {
@@ -365,7 +369,7 @@ class ELKSearch(object):
             logging.error("search failed for {0}".format(self.search_name))
             logging.error(search_result.text)
             return False
-        logging.debug("result messages: timed_out:{} - took:{} - _shards:{} - _clusters:{}".format(search_result.json()['timed_out'],search_result.json()['took'],search_result.json()['_shards'],search_result.json()['_clusters']))
+        logging.debug("result messages: timed_out:{} - took:{} - _shards:{}".format(search_result.json()['timed_out'],search_result.json()['took'],search_result.json()['_shards']))
         return search_result
 
     #I have not found a way to do this from an elastic search language perspective
