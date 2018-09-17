@@ -485,7 +485,7 @@ class ELKSearch(object):
                 if fields_exist:
                     build_field = ""
                     for field in fields['fields'].split(','):
-                        build_field = build_field + alert_result['_source'][field] + fields['delim']
+                        build_field = "{}{}{}".format(build_field,alert_result['_source'][field],fields['delim'])
                     build_field = build_field[:len(build_field)-len(fields['delim'])] #take off the last delim from the loop
                     alert_result['_source'][fields['new_field_name']] = build_field
         return alert_result
