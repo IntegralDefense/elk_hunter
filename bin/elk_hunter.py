@@ -317,7 +317,7 @@ class ELKSearch(object):
             time_spec = { "range": { "@timestamp": { "gt": earliest, "lte": latest } } }
         else:
             #@event_timestamp is the custom field for all logs which is the  time of the event in the log that is being indexed
-            time_spec = { "range": { "event_timestamp": { "gt": earliest, "lte": latest } } }
+            time_spec = { "range": { "@event_timestamp": { "gt": earliest, "lte": latest } } }
 
         return time_spec
 
