@@ -692,10 +692,8 @@ class ELKSearch(object):
             for observables in alerts[alert_key]:
                 # is this observable type a temporal type?
                 o_time = observables[time_field] if time_field in observables else None
-                print(time_field)
-                print(observables)
-                print(o_time)
                 if o_time is not None:
+                    # time from elk comes back with ending in Z for UTC, change to +00:00 to satisfy the regex below that might be a legacy pattern for ace
                     o_time = o_time.replace('Z','+00:00')
                     m = re.match(r'^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})\.[0-9]{3}[-+][0-9]{2}:[0-9]{2}$', o_time)
                     if not m:
