@@ -17,6 +17,7 @@ import time
 import traceback
 import requests
 import json
+import dateutil.parser
 requests.packages.urllib3.disable_warnings()
 
 
@@ -691,8 +692,11 @@ class ELKSearch(object):
             for observables in alerts[alert_key]:
                 # is this observable type a temporal type?
                 o_time = observables[time_field] if time_field in observables else None
+                print(time_field)
+                print(observables)
+                print(o_time)
                 if o_time is not None:
-                    o_time = o_time.strftime("%Y-%m-%d %H:%M:%S")
+                    o_time = o_time.replace('Z','+00:00')
                     m = re.match(r'^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})\.[0-9]{3}[-+][0-9]{2}:[0-9]{2}$', o_time)
                     if not m:
                         logging.error("{0} field does not match expected format: {1}".format(time_field,o_time))
