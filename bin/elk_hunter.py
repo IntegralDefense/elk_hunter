@@ -344,7 +344,7 @@ class ELKSearch(object):
         if index:
             search_uri = "{}{}/_search".format(CONFIG['elk']['uri'],index)
         else:
-            search_uri = "{}{}/_search".format(CONFIG['elk']['uri'],"*:*")
+            search_uri = "{}{}/_search".format(CONFIG['elk']['uri'],"*")
         if filter_script:
             script = { 
                 'script': {
