@@ -314,11 +314,10 @@ class ELKSearch(object):
 
         # create time range filter for query
         if use_index_time:
-            #by default @timestamp is the time the data was indexed by elasticsearch with logstash
-            time_spec = { "range": { "@timestamp": { "gt": earliest, "lte": latest } } }
+            #depending on your elasticsearch environment, the @timestamp field might be index time or event time - specify this in your ini file
+            time_spec = { "range": { CONFIG['elk']['index_time_field']: { "gt": earliest, "lte": latest } } }
         else:
-            #@event_timestamp is the custom field for all logs which is the  time of the event in the log that is being indexed
-            time_spec = { "range": { "@event_timestamp": { "gt": earliest, "lte": latest } } }
+            time_spec = { "range": { CONFIG['elk']['event_time_field']: { "gt": earliest, "lte": latest } } }
 
         return time_spec
 
@@ -688,7 +687,7 @@ class ELKSearch(object):
                     alert.add_tag(tag)
 
             # extract observables
-            time_field = CONFIG['elk']['time_field']
+            time_field = CONFIG['elk']['event_time_field']
             for observables in alerts[alert_key]:
                 # is this observable type a temporal type?
                 o_time = observables[time_field] if time_field in observables else None
