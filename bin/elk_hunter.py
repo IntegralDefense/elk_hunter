@@ -392,6 +392,26 @@ class ELKSearch(object):
         else:
             return None
 
+    #I have not found a way to do this from an elastic search language perspective
+    #this function is used to pull configs from the search file into a dictionary for post processing of results
+    def getSearchFieldCount(self,search):
+        #--field-count:src_ip,>80
+        #--field-count:src_ip,<10
+        item = '--field-count:'
+        new_fields = []
+        new_field = {}
+        for x in re.split('^| --',search):
+            x = x.strip()
+            new_field = {}
+            if x.startswith(item) or x.startswith('--'+item) or x.startswith(item[2:]):
+               params = x.split(":",1)[1].strip()
+               new_field['field_name'],new_field['match_condition'] = params.split(',',1)
+               new_fields.append(new_field)
+        if new_fields:
+            return new_fields
+        else:
+            return None
+
     #there are times we like to add fields together to create a new field, I can't figure out how to do this in elasticsearch and still get the entire document in the output results, so doing it on the client side
     def getSearchJoinedFields(self,search):
         #--join-fields:exe_location,hostname,exe_path,@
@@ -493,6 +513,38 @@ class ELKSearch(object):
                     build_field = build_field[:len(build_field)-len(fields['delim'])] #take off the last delim from the loop
                     alert_result['_source'][fields['new_field_name']] = build_field
         return alert_result
+
+    # for the results passed in, if 
+    def matchFieldCount(self,results,field_match):
+        # count values for each field item specified in --field-count
+        count = {}
+        keep_results = []
+        for f in field_match:
+            for item in results:
+                # f['field_name'] will be the name of the field in the resulting log line (src_ip for example)
+                if item['_source'][f['field_name']] in count.keys():
+                    count[item['_source'][f['field_name']]] += 1 
+                else:
+                    count[item['_source'][f['field_name']]] = 1
+
+            match = f['match_condition']
+            for key in count.keys():
+                if '>' in match:
+                    num = int(match[match.index('>')+1:len(match)])
+                    if count[key] > num:
+                        # keep all matching values
+                        # go through all results, keep the ones where count is greater than specified
+                        for item in results:
+                            if item['_source'][f['field_name']] == key:
+                                keep_results.append(item)
+
+                if '<' in match:
+                    num = int(match[match.index('<')+1:len(match)])
+                    if count[key] < num:
+                        for item in results:
+                            if item['_source'][f['field_name']] == key:
+                                keep_results.append(item)                        
+        return keep_results
         
     def _execute(self, earliest=None, latest=None, use_index_time=None, max_result_count=None):
         # read in search text
@@ -526,6 +578,7 @@ class ELKSearch(object):
         search_index = None
         output_fields = None
         output_field_rename = None
+        count_match = None
         
         search_json = None
         now = time.mktime(time.localtime())
@@ -539,6 +592,7 @@ class ELKSearch(object):
             added_fields = self.getSearchAddedFields(searches[0])
             joined_fields = self.getSearchJoinedFields(searches[0])
             split_fields = self.getSearchSplitField(searches[0])
+            field_count_match = self.getSearchFieldCount(searches[0])
             search_json,search_uri = self.search_to_json(search_query,search_index,filter_script,output_fields,earliest,latest,use_index_time,max_result_count)
  
         else:
@@ -555,6 +609,7 @@ class ELKSearch(object):
                 added_fields = self.getSearchAddedFields(search)
                 joined_fields = self.getSearchJoinedFields(search)
                 split_fields = self.getSearchSplitField(search)
+                field_count_match = self.getSearchFieldCount(search)
 
                 output_field_rename = self.getSearchFileItem(search,'--field-rename:')
                 #append previous command output to this search if not the first search
@@ -628,6 +683,9 @@ class ELKSearch(object):
         alerts = {}
         tmp_key = 0
         results = search_result.json()["hits"]["hits"]
+        # if --field-count:<fieldname>,><number>
+        if field_count_match:
+            results = self.matchFieldCount(results,field_count_match)
         for alert_result in results:
             combined_results = {}
             #####for any new fields defined from existing fields for output
