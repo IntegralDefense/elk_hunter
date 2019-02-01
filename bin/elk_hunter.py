@@ -713,7 +713,8 @@ class ELKSearch(object):
                     alerts[tmp_key] = []
                 alerts[tmp_key].append(combined_results)
             else:
-                alerts["null"] = combined_results
+                alerts["null"] = []
+                alerts["null"].append(combined_results)
         if alerts:
             logging.debug("{}".format(json.dumps(alerts)))
         else:
@@ -755,15 +756,6 @@ class ELKSearch(object):
                     m = re.match(r'^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})\.[0-9]{3}[-+][0-9]{2}:[0-9]{2}$', o_time)
                     if not m:
                         logging.error("{0} field does not match expected format: {1}".format(time_field,o_time))
-                    else:
-                        # reformat this time for ACE
-                        o_time = '{0}-{1}-{2} {3}:{4}:{5}'.format(
-                            m.group(1),
-                            m.group(2),
-                            m.group(3),
-                            m.group(4),
-                            m.group(5),
-                            m.group(6))
 
                 for o_field in self.config['observable_mapping'].keys():
                     if o_field not in observables:
@@ -787,7 +779,7 @@ class ELKSearch(object):
 
                         if o_value.strip() == '' or o_value.strip() == '-':
                             continue
-
+                        logging.debug("adding observable {}, {}, {}, {}".format(o_type,o_value,o_time,o_field))
                         alert.add_observable(o_type, 
                                              o_value, 
                                              o_time if self.is_temporal_field(o_field) else None, 
