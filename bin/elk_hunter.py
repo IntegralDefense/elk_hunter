@@ -870,7 +870,7 @@ if __name__ == '__main__':
     # load lib/ onto the python path
     sys.path.append('lib')
 
-    from saq.client import Alert
+    from ace_api import Alert
 
     if args.kill:
         daemon_path = os.path.join(BASE_DIR, 'var', 'daemon.pid')
