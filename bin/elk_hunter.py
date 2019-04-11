@@ -17,6 +17,7 @@ import time
 import traceback
 import requests
 import json
+import dateutil.parser
 requests.packages.urllib3.disable_warnings()
 
 
@@ -180,9 +181,11 @@ class SearchDaemon(object):
             self.execution_slots.release()
 
 class ELKSearch(object):
-    def __init__(self, rules_dir, search_name):
+    def __init__(self, rules_dir, search_name, submit_alert=True, print_alert_details=False):
         self.rules_dir = rules_dir
         self.search_name = search_name
+        self.submit_alert = submit_alert
+        self.print_alert_details = print_alert_details
         self.config_path = os.path.join(self.rules_dir, '{}.ini'.format(search_name))
         self.last_executed_path = os.path.join(BASE_DIR, 'var', '{}.last_executed'.format(search_name))
         self.config = CaseConfigParser()
@@ -313,9 +316,10 @@ class ELKSearch(object):
 
         # create time range filter for query
         if use_index_time:
-            time_spec = { "range": { "@timestamp": { "gt": earliest, "lte": latest } } }
+            #depending on your elasticsearch environment, the @timestamp field might be index time or event time - specify this in your ini file
+            time_spec = { "range": { CONFIG['elk']['index_time_field']: { "gt": earliest, "lte": latest } } }
         else:
-            time_spec = { "range": { "event_timestamp": { "gt": earliest, "lte": latest } } }
+            time_spec = { "range": { CONFIG['elk']['event_time_field']: { "gt": earliest, "lte": latest } } }
 
         return time_spec
 
@@ -337,7 +341,11 @@ class ELKSearch(object):
         }
         if fields:
             search_json['_source'] = fields.split(',')
-        search_uri = "{}{}/_search".format(CONFIG['elk']['uri'],index)
+        #allow for index to not be set, many companies will create a field for the index alias instead of using elasticsearch's index pattern and just alias *
+        if index:
+            search_uri = "{}{}/_search".format(CONFIG['elk']['uri'],index)
+        else:
+            search_uri = "{}{}/_search".format(CONFIG['elk']['uri'],"*")
         if filter_script:
             script = { 
                 'script': {
@@ -363,7 +371,7 @@ class ELKSearch(object):
             logging.error("search failed for {0}".format(self.search_name))
             logging.error(search_result.text)
             return False
-        logging.debug("result messages: timed_out:{} - took:{} - _shards:{} - _clusters:{}".format(search_result.json()['timed_out'],search_result.json()['took'],search_result.json()['_shards'],search_result.json()['_clusters']))
+        logging.debug("result messages: timed_out:{} - took:{} - _shards:{}".format(search_result.json()['timed_out'],search_result.json()['took'],search_result.json()['_shards']))
         return search_result
 
     #I have not found a way to do this from an elastic search language perspective
@@ -380,6 +388,26 @@ class ELKSearch(object):
             if x.startswith(item) or x.startswith('--'+item) or x.startswith(item[2:]):
                params = x.split(":",1)[1].strip()
                new_field['new_field_name'],new_field['from_field_name'],new_field['regex'] = params.split(',',2)
+               new_fields.append(new_field)
+        if new_fields:
+            return new_fields
+        else:
+            return None
+
+    #I have not found a way to do this from an elastic search language perspective
+    #this function is used to pull configs from the search file into a dictionary for post processing of results
+    def getSearchFieldCount(self,search):
+        #--field-count:src_ip,>80
+        #--field-count:src_ip,<10
+        item = '--field-count:'
+        new_fields = []
+        new_field = {}
+        for x in re.split('^| --',search):
+            x = x.strip()
+            new_field = {}
+            if x.startswith(item) or x.startswith('--'+item) or x.startswith(item[2:]):
+               params = x.split(":",1)[1].strip()
+               new_field['field_name'],new_field['match_condition'] = params.split(',',1)
                new_fields.append(new_field)
         if new_fields:
             return new_fields
@@ -479,10 +507,46 @@ class ELKSearch(object):
                 if fields_exist:
                     build_field = ""
                     for field in fields['fields'].split(','):
-                        build_field = build_field + alert_result['_source'][field] + fields['delim']
+                        if type(alert_result['_source'][field]) is list:
+                        #if the field is a list, default to using the first value and continue (really shouldn't try to concat a field that has multiple values
+                            build_field = "{}{}{}".format(build_field,alert_result['_source'][field][0],fields['delim'])
+                        else:
+                            build_field = "{}{}{}".format(build_field,alert_result['_source'][field],fields['delim'])
                     build_field = build_field[:len(build_field)-len(fields['delim'])] #take off the last delim from the loop
                     alert_result['_source'][fields['new_field_name']] = build_field
         return alert_result
+
+    # for the results passed in, if 
+    def matchFieldCount(self,results,field_match):
+        # count values for each field item specified in --field-count
+        count = {}
+        keep_results = []
+        for f in field_match:
+            for item in results:
+                # f['field_name'] will be the name of the field in the resulting log line (src_ip for example)
+                if item['_source'][f['field_name']] in count.keys():
+                    count[item['_source'][f['field_name']]] += 1 
+                else:
+                    count[item['_source'][f['field_name']]] = 1
+
+            match = f['match_condition']
+            for key in count.keys():
+                if '>' in match:
+                    num = int(match[match.index('>')+1:len(match)])
+                    if count[key] > num:
+                        # keep all matching values
+                        # go through all results, keep the ones where count is greater than specified
+                        for item in results:
+                            if item['_source'][f['field_name']] == key:
+                                keep_results.append(item)
+
+                if '<' in match:
+                    num = int(match[match.index('<')+1:len(match)])
+                    if count[key] < num:
+                        for item in results:
+                            if item['_source'][f['field_name']] == key:
+                                keep_results.append(item)                        
+        return keep_results
         
     def _execute(self, earliest=None, latest=None, use_index_time=None, max_result_count=None):
         # read in search text
@@ -516,6 +580,7 @@ class ELKSearch(object):
         search_index = None
         output_fields = None
         output_field_rename = None
+        count_match = None
         
         search_json = None
         now = time.mktime(time.localtime())
@@ -529,6 +594,7 @@ class ELKSearch(object):
             added_fields = self.getSearchAddedFields(searches[0])
             joined_fields = self.getSearchJoinedFields(searches[0])
             split_fields = self.getSearchSplitField(searches[0])
+            field_count_match = self.getSearchFieldCount(searches[0])
             search_json,search_uri = self.search_to_json(search_query,search_index,filter_script,output_fields,earliest,latest,use_index_time,max_result_count)
  
         else:
@@ -545,6 +611,7 @@ class ELKSearch(object):
                 added_fields = self.getSearchAddedFields(search)
                 joined_fields = self.getSearchJoinedFields(search)
                 split_fields = self.getSearchSplitField(search)
+                field_count_match = self.getSearchFieldCount(search)
 
                 output_field_rename = self.getSearchFileItem(search,'--field-rename:')
                 #append previous command output to this search if not the first search
@@ -618,6 +685,9 @@ class ELKSearch(object):
         alerts = {}
         tmp_key = 0
         results = search_result.json()["hits"]["hits"]
+        # if --field-count:<fieldname>,><number>
+        if field_count_match:
+            results = self.matchFieldCount(results,field_count_match)
         for alert_result in results:
             combined_results = {}
             #####for any new fields defined from existing fields for output
@@ -645,7 +715,8 @@ class ELKSearch(object):
                     alerts[tmp_key] = []
                 alerts[tmp_key].append(combined_results)
             else:
-                alerts["null"] = combined_results
+                alerts["null"] = []
+                alerts["null"].append(combined_results)
         if alerts:
             logging.debug("{}".format(json.dumps(alerts)))
         else:
@@ -677,22 +748,16 @@ class ELKSearch(object):
                     alert.add_tag(tag)
 
             # extract observables
+            time_field = CONFIG['elk']['event_time_field']
             for observables in alerts[alert_key]:
                 # is this observable type a temporal type?
-                o_time = observables['_time'] if '_time' in observables else None
+                o_time = observables[time_field] if time_field in observables else None
                 if o_time is not None:
+                    # time from elk comes back with ending in Z for UTC, change to +00:00 to satisfy the regex below that might be a legacy pattern for ace
+                    o_time = o_time.replace('Z','+00:00')
                     m = re.match(r'^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})\.[0-9]{3}[-+][0-9]{2}:[0-9]{2}$', o_time)
                     if not m:
-                        logging.error("_time field does not match expected format: {0}".format(o_time))
-                    else:
-                        # reformat this time for ACE
-                        o_time = '{0}-{1}-{2} {3}:{4}:{5}'.format(
-                            m.group(1),
-                            m.group(2),
-                            m.group(3),
-                            m.group(4),
-                            m.group(5),
-                            m.group(6))
+                        logging.error("{0} field does not match expected format: {1}".format(time_field,o_time))
 
                 for o_field in self.config['observable_mapping'].keys():
                     if o_field not in observables:
@@ -716,7 +781,7 @@ class ELKSearch(object):
 
                         if o_value.strip() == '' or o_value.strip() == '-':
                             continue
-
+                        logging.debug("adding observable {}, {}, {}, {}".format(o_type,o_value,o_time,o_field))
                         alert.add_observable(o_type, 
                                              o_value, 
                                              o_time if self.is_temporal_field(o_field) else None, 
@@ -725,7 +790,13 @@ class ELKSearch(object):
             if CONFIG['ace'].getboolean('enabled'):
                 try:
                     logging.info("submitting alert {}".format(alert.description))
-                    alert.submit(CONFIG['ace']['uri'], CONFIG['ace']['key'])
+                    if self.submit_alert:
+                        alert.submit(CONFIG['ace']['uri'], CONFIG['ace']['key'])
+                    else:
+                        if self.print_alert_details:
+                            print(str(alert))
+                        else:
+                            print(alert.description)
                 except Exception as e:
                     logging.error("unable to submit alert {}: {}".format(alert, str(e)))
 
@@ -760,6 +831,11 @@ if __name__ == '__main__':
         help="Replace configuration specific latest time.")
     parser.add_argument('-i', '--use-index-time', required=False, default=None, action='store_true', dest='use_index_time',
         help="Use __index time specs instead.")
+
+    parser.add_argument('-p', '--print-alerts', default=False, action='store_true', dest='print_alerts',
+        help="Print the alerts that would be generated instead of sending them to ACE.")
+    parser.add_argument('--print-alert-details', default=False, action='store_true', dest='print_alert_details',
+        help="Valid only with the -p option -- prints the details of the generated alerts instead of just the description.")
 
     parser.add_argument("searches", nargs=argparse.REMAINDER, help="One or more searches to execute.")
 
@@ -807,7 +883,7 @@ if __name__ == '__main__':
     # load lib/ onto the python path
     sys.path.append('lib')
 
-    from saq.client import Alert
+    from ace_api import Alert
 
     if args.kill:
         daemon_path = os.path.join(BASE_DIR, 'var', 'daemon.pid')
@@ -930,7 +1006,7 @@ if __name__ == '__main__':
             for rules_dir in RULES_DIR:
                 for search_result in glob.glob('{0}/*{1}*.ini'.format(rules_dir, search_name)):
                     search_name, _ = os.path.splitext(os.path.basename(search_result))
-                    search_object = ELKSearch(rules_dir, search_name)
+                    search_object = ELKSearch(rules_dir, search_name, submit_alert=not args.print_alerts, print_alert_details=args.print_alert_details)
                     search_object.execute(earliest=args.earliest, latest=args.latest, use_index_time=args.use_index_time)
     except KeyboardInterrupt:
         pass
