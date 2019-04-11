@@ -181,9 +181,11 @@ class SearchDaemon(object):
             self.execution_slots.release()
 
 class ELKSearch(object):
-    def __init__(self, rules_dir, search_name):
+    def __init__(self, rules_dir, search_name, submit_alert=True, print_alert_details=False):
         self.rules_dir = rules_dir
         self.search_name = search_name
+        self.submit_alert = submit_alert
+        self.print_alert_details = print_alert_details
         self.config_path = os.path.join(self.rules_dir, '{}.ini'.format(search_name))
         self.last_executed_path = os.path.join(BASE_DIR, 'var', '{}.last_executed'.format(search_name))
         self.config = CaseConfigParser()
@@ -788,7 +790,13 @@ class ELKSearch(object):
             if CONFIG['ace'].getboolean('enabled'):
                 try:
                     logging.info("submitting alert {}".format(alert.description))
-                    alert.submit(CONFIG['ace']['uri'], CONFIG['ace']['key'])
+                    if self.submit_alert:
+                        alert.submit(CONFIG['ace']['uri'], CONFIG['ace']['key'])
+                    else:
+                        if self.print_alert_details:
+                            print(str(alert))
+                        else:
+                            print(alert.description)
                 except Exception as e:
                     logging.error("unable to submit alert {}: {}".format(alert, str(e)))
 
@@ -823,6 +831,11 @@ if __name__ == '__main__':
         help="Replace configuration specific latest time.")
     parser.add_argument('-i', '--use-index-time', required=False, default=None, action='store_true', dest='use_index_time',
         help="Use __index time specs instead.")
+
+    parser.add_argument('-p', '--print-alerts', default=False, action='store_true', dest='print_alerts',
+        help="Print the alerts that would be generated instead of sending them to ACE.")
+    parser.add_argument('--print-alert-details', default=False, action='store_true', dest='print_alert_details',
+        help="Valid only with the -p option -- prints the details of the generated alerts instead of just the description.")
 
     parser.add_argument("searches", nargs=argparse.REMAINDER, help="One or more searches to execute.")
 
@@ -993,7 +1006,7 @@ if __name__ == '__main__':
             for rules_dir in RULES_DIR:
                 for search_result in glob.glob('{0}/*{1}*.ini'.format(rules_dir, search_name)):
                     search_name, _ = os.path.splitext(os.path.basename(search_result))
-                    search_object = ELKSearch(rules_dir, search_name)
+                    search_object = ELKSearch(rules_dir, search_name, submit_alert=not args.print_alerts, print_alert_details=args.print_alert_details)
                     search_object.execute(earliest=args.earliest, latest=args.latest, use_index_time=args.use_index_time)
     except KeyboardInterrupt:
         pass
